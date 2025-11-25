@@ -1,62 +1,81 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
-import json
-import os
+from utils.data import load_json
 
-OWNER_ID = int(os.getenv("OWNER_ID"))
+CONFIG_FILE = "data/config.json"
 
-def load_config():
-    with open("config.json", "r") as f:
-        return json.load(f)
+# ------------------------------------------------------------
+# Load config helper
+# ------------------------------------------------------------
+def get_config():
+    return load_json(CONFIG_FILE)
 
-def save_config(config):
-    with open("config.json", "w") as f:
-        json.dump(config, f, indent=4)
 
-class Permissions(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
+# ------------------------------------------------------------
+# OWNER CHECK — owner can use ALL commands regardless of roles
+# ------------------------------------------------------------
+async def is_owner(interaction: discord.Interaction) -> bool:
+    config = get_config()
+    owner_id = config.get("owner_id")
 
-    def is_staff(self, user: discord.Member):
-        if user.id == OWNER_ID:
-            return True
-        config = load_config()
-        staff_ids = config["staff_roles"]
-        return any(role.id in staff_ids for role in user.roles)
+    return interaction.user.id == owner_id
 
-    async def interaction_check(self, interaction: discord.Interaction):
+
+# ------------------------------------------------------------
+# STAFF CHECK — staff + owner can use Staff commands
+# ------------------------------------------------------------
+async def is_staff(interaction: discord.Interaction) -> bool:
+    config = get_config()
+
+    # Owner bypass
+    if interaction.user.id == config.get("owner_id"):
         return True
 
-    @app_commands.command(
-        name="staff_addrole",
-        description="Adds a role to the staff whitelist."
-    )
-    async def staff_addrole(self, interaction: discord.Interaction, role: discord.Role):
-        config = load_config()
-        if not self.is_staff(interaction.user):
-            return await interaction.response.send_message("❌ You cannot use this.", ephemeral=True)
+    staff_roles = config.get("staff_roles", [])
 
-        if role.id not in config["staff_roles"]:
-            config["staff_roles"].append(role.id)
-            save_config(config)
+    # Check if member has any staff role
+    if any(role.id in staff_roles for role in interaction.user.roles):
+        return True
 
-        await interaction.response.send_message(f"✅ Added {role.mention} as staff.", ephemeral=True)
+    return False
 
-    @app_commands.command(
-        name="staff_removerole",
-        description="Removes a staff role from whitelist."
-    )
-    async def staff_removerole(self, interaction: discord.Interaction, role: discord.Role):
-        config = load_config()
-        if not self.is_staff(interaction.user):
-            return await interaction.response.send_message("❌ You cannot use this.", ephemeral=True)
 
-        if role.id in config["staff_roles"]:
-            config["staff_roles"].remove(role.id)
-            save_config(config)
+# ------------------------------------------------------------
+# GUILD WHITELIST CHECK
+# ------------------------------------------------------------
+async def in_allowed_guild(interaction: discord.Interaction) -> bool:
+    config = get_config()
+    allowed = config.get("allowed_guilds")
 
-        await interaction.response.send_message(f"🗑 Removed {role.mention} from staff.", ephemeral=True)
+    # If no whitelist defined, allow everywhere
+    if not allowed:
+        return True
 
-async def setup(bot):
-    await bot.add_cog(Permissions(bot))
+    return interaction.guild_id in allowed
+
+
+# ------------------------------------------------------------
+# Decorators for App Commands
+# ------------------------------------------------------------
+def require_owner():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if await is_owner(interaction):
+            return True
+        raise app_commands.CheckFailure("You do not have permission to use this command.")
+    return app_commands.check(predicate)
+
+
+def require_staff():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if await is_staff(interaction):
+            return True
+        raise app_commands.CheckFailure("You do not have permission to use this command.")
+    return app_commands.check(predicate)
+
+
+def require_allowed_guild():
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if await in_allowed_guild(interaction):
+            return True
+        raise app_commands.CheckFailure("This bot is not enabled in this server.")
+    return app_commands.check(predicate)
